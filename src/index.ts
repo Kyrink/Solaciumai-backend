@@ -10,45 +10,92 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors({
-    origin: 'http://localhost:3000', // or whatever port your frontend is running on
-    methods: ['POST', 'GET', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-})); // Allow cross-origin requests
-app.use(express.json()); // Parse JSON request bodies
+    origin: 'http://localhost:3000',
+    methods: ['GET', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    credentials: true
+}));
+app.use(express.json());
 
-// Add a test GET endpoint
-app.get("/", (req: Request, res: Response) => {
-  res.json({ message: "Server is running" });
-});
-
-// Define the proxy endpoint
-app.post("/api/langflow", async (req: Request, res: Response) => {
+app.get("/api/chat", async (req: Request, res: Response) => {
   try {
-    const { input_value, input_type, output_type, tweaks } = req.body;
+    const message = req.query.message as string;
     
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("OpenAI API key is not configured");
+    }
+
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000');
+
     const response = await axios.post(
-      `https://api.langflow.astra.datastax.com/lf/${process.env.LANGFLOW_ID}/api/v1/run/${process.env.FLOW_ID}`,
+      'https://api.openai.com/v1/chat/completions',
       {
-        input_value,
-        input_type,
-        output_type,
-        tweaks
+        model: "gpt-4",
+        messages: [
+          { 
+            role: "system", 
+            content: "You are a helpful AI assistant specializing in immigration law and procedures. Based on the user's query, perform a targeted search of recent, credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources. Provide a concise, accurate response addressing the user's question directly.\n\nWhen a yes or no response is sufficient, answer decisively without prefacing with unnecessary phrases. Aim for simplicity, clarity, and brevity in all responses.\n\nIf applicable and for users seeking additional information, include a Markdown link without accompanying text for seamless navigation:\n\n- Example: [Understanding Work Permit Extensions for Asylum Seekers](#)\n\nReturn the response in Markdown format, ensuring the main response is conversational, clear, and very concise. The response should focus on directly answering the query, with supplemental information accessible through a link when relevant. if there is no relevant information, respond with 'No information found'." 
+          },
+          { 
+            role: "user", 
+            content: message 
+          }
+        ],
+        stream: true,
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.LANGFLOW_API_KEY}`,
-          "Content-Type": "application/json",
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
         },
+        responseType: 'stream'
       }
     );
-    res.json(response.data);
+
+    // Handle the stream
+    response.data.on('data', (chunk: Buffer) => {
+      const lines = chunk.toString().split('\n');
+      
+      for (const line of lines) {
+        if (line.trim().startsWith('data: ')) {
+          const data = line.slice(6);
+          
+          if (data === '[DONE]') {
+            res.write('data: [DONE]\n\n');
+            continue;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices[0]?.delta?.content;
+            
+            if (content) {
+              // Send each token immediately
+              res.write(`data: ${JSON.stringify({ token: content })}\n\n`);
+            }
+          } catch (error) {
+            console.error('Error parsing chunk:', error);
+          }
+        }
+      }
+    });
+
+    response.data.on('end', () => {
+      res.write('event: done\ndata: stream ended\n\n');
+      res.end();
+    });
+
   } catch (error: any) {
-    console.error("Error in proxy request:", error.response ? error.response.data : error.message || error);
-    res.status(error.response?.status || 500).send("Error in proxy request");
+    console.error("Error details:", error);
+    res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
   }
 });
 
-// Start the server
 app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
