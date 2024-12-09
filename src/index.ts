@@ -15,7 +15,8 @@ app.use(
   cors({
     origin: [
       "https://solacium-ai-frontend.vercel.app",
-      "https://solacium-ai-frontend-hy7kqaexw-kyrin-s-projects.vercel.app",
+      "https://solacium-ai-frontend-k00bpjb3z-kyrin-s-projects.vercel.app",
+      "https://www.solacium.one",
       "http://localhost:3000", // for local development
     ],
     methods: ["GET", "POST", "OPTIONS"],
