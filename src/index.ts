@@ -71,34 +71,50 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
             role: "system",
             content: `
             You are a helpful AI assistant specializing in immigration law and procedures. 
-            Based on the user's query, perform a targeted search of recent, credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources. 
+            Based on the user's query, perform a targeted search of recent, 
+            credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources. 
             Provide a concise, accurate response addressing the user's question directly.
 
-            - Always respond in the same language as the user's query.
-            - For immigration-related queries, translate and tailor your response to align with the grammar, style, and nuances of the user's language.
-            - If a yes or no response is sufficient, answer decisively without prefacing with unnecessary phrases.
-            - Ensure simplicity, clarity, and brevity in responses.
+            When a yes or no response is sufficient, answer decisively without prefacing with unnecessary phrases.
+            Aim for simplicity, clarity, and brevity in all responses.
 
-            If additional information is helpful, include a Markdown link without accompanying text for seamless navigation:
+            Return the response in **Markdown format** with the following structure:
+             **1. Numbered Steps**:
+              - Each step starts with a number followed by a period and space (e.g., "1. Step Title")
+              - Add a blank line between each step
 
-            - Always return responses in Markdown format.
-            FORMATTING GUIDELINES:
-            - Use **bold** for important terms, deadlines, or document names
-            - Use *italics* for emphasis or definitions
-            - Create clear paragraphs with line breaks
-            - Use numbered lists (1., 2., 3.) for sequential steps
-            - Use bullet points (*) for non-sequential items
-            - Create section headers with ###
-            - Include links in [text](url) format
-            - Indent sub-points when needed
-            - Use > for important quotes or notes
-            - Keep formatting natural and intuitive
+             **2. Supporting Details**:
+              - Place supporting details on a new indented line under each step
+              - Use two spaces for indentation before the supporting text.
+             ** 3. Markdown Links**:
+                For links, use this exact format:
+                  [Link Text](URL)
+                  Example: [USCIS Official Website](https://www.uscis.gov)
 
-            - For queries unrelated to immigration, respond in the user's language with: 
-              "I am an AI agent designed to assist with immigration-related questions. I cannot help with this."
-            - If no relevant information is found, respond with "No information found" in the user's language.
+            ### Example:
+             ** 1. Step One: **
+              Supporting details for step one.  
 
-            Ensure all responses reflect conversational tone, clarity, and accessibility, respecting linguistic and cultural accuracy.
+             ** 2. Step Two: **  
+              Supporting details for step two.
+
+            4. Add a space after each punctuation mark:
+              - Period (. )
+              - Comma (, )
+              - Colon (: )
+              - Semicolon (; )
+              - Question mark (? )
+              - Exclamation mark (! )
+              - Add a new line before each step title
+
+            If the query is unrelated to immigration, respond in the same language as the user’s query with a variation of: 
+            "I am an AI agent designed to assist with immigration-related questions. I cannot help with this." Avoid providing any further responses for out-of-context queries.
+
+            Always answer the user's query in the same language it was asked. 
+            If the question is immigration-related, translate your response into the user’s language to ensure it is accessible and clear. 
+            If there is no relevant information, respond with "No information found" in the user's language.
+
+            Respond in the user's query language. 
             `,
           },
           ...parsedHistory.map((entry: { query: string; response: string }) => [
@@ -117,53 +133,76 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
     });
 
     let buffer = '';
+
     openAIResponse.data.on("data", (chunk: Buffer) => {
       const lines = chunk.toString().split("\n");
       for (const line of lines) {
         if (line.startsWith("data: ")) {
-          const data = line.slice(5).trim();
-          
-          // Skip empty data lines
-          if (!data) continue;
-          
-          if (data === "[DONE]") {
+          const data = line.slice(5).trim(); // Remove "data: " prefix
+    
+          // Handle end of stream or flush remaining buffer
+          if (!data || data === "[DONE]") {
             if (buffer.trim()) {
-              res.write(`data: ${JSON.stringify({ token: buffer.trim() })}\n\n`);
+              try {
+                console.log("Raw markdown buffer:", buffer);
+                const cleanToken = formatBuffer(buffer);
+                res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
+                buffer = '';
+              } catch (err) {
+                console.error("Error processing buffer content:", err);
+              }
             }
-            res.write(`data: [DONE]\n\n`);
-            res.end();
-            return;
+            if (data === "[DONE]") {
+              res.write(`data: [DONE]\n\n`);
+              res.end();
+              return;
+            }
+            continue;
           }
-
+    
           try {
-            const parsed = JSON.parse(data);
-            const token = parsed.choices?.[0]?.delta?.content;
-            if (token) {
-              buffer += token;
-              
-              // Only send when we have a complete sentence or significant chunk
-              if (buffer.match(/[.!?]\s*$/) || buffer.length > 100) {
-                const cleanToken = buffer
-                  .replace(/\n{2,}/g, '\n')
-                  .replace(/\s{2,}/g, ' ')
-                  .trim();
+            // Handle partial JSON chunks
+            let jsonData = data;
+            try {
+              const parsed = JSON.parse(jsonData);
+              const token = parsed.choices?.[0]?.delta?.content;
+    
+              if (token) {
+                buffer += token;
+                console.log("Current buffer:", buffer); // Log current buffer state
                 
-                if (cleanToken) {
+                // Only send complete sentences or paragraphs
+                if (buffer.match(/[.!?]\s*$/) || buffer.includes('\n\n')) {
+                  console.log("Sending buffer:", buffer);
+                  const cleanToken = formatBuffer(buffer);
                   res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
                   buffer = '';
                 }
               }
+            } catch (parseError) {
+              console.log("Incomplete JSON chunk received:", jsonData);
+              // Continue to next chunk if JSON is incomplete
+              continue;
             }
-          } catch (err) {
-            // Log the problematic data for debugging
-            console.error("Error parsing SSE chunk. Data:", data);
-            console.error("Error details:", err);
-            // Continue processing without breaking the stream
-            continue;
+          } catch (err: unknown) {
+            console.error("Stream processing error:", err instanceof Error ? err.message : String(err));
           }
         }
       }
     });
+    
+    // Helper function to format the buffer content
+    function formatBuffer(buffer: string) {
+      return buffer
+        .replace(
+          /\[(.*?)\]\(\[Click here\]\((.*?)\)\)/g,
+          (_, text, url) => `[${text}](${url})`
+        ) // Properly format nested "Click here" links
+        .replace(/\[Click here\]/g, '') // Remove redundant "Click here"
+        .replace(/\(\s*Click here\s*\)/g, '') // Remove remaining parentheses with "Click here"
+        .replace(/\s*\)\)/g, ')') // Remove double closing parentheses
+        .trim(); // Remove extra spaces
+    }
 
     // Handle stream end
     openAIResponse.data.on("end", () => {
