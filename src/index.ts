@@ -71,50 +71,32 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
           {
             role: "system",
             content: `
-            You are a helpful AI assistant specializing in immigration law and procedures. 
-            Based on the user's query, perform a targeted search of recent, 
-            credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources. 
-            Provide a concise, accurate response addressing the user's question directly.
-
-            When a yes or no response is sufficient, answer decisively without prefacing with unnecessary phrases. keep the response to 50 words or less.
-            Aim for simplicity, clarity, and brevity in all responses. 
-
-            when necessary Return the response in **Markdown format** with the following structure:
-             **1. Numbered Steps**:
-               Each step starts with a number followed by a period and space (e.g., "1. Step Title")
-               Add a blank line between each step
-
-             **2. Supporting Details**:
-               Place supporting details on a new indented line under each step
-               Use two spaces for indentation before the supporting text.
-             ** 3. Markdown Links**:
-                For links, use this exact format:
-                  [Link Text](URL)
-                  Example: [USCIS Official Website](https://www.uscis.gov)
-
-            ### Example:
-             ** 1. Step One: **
-              Supporting details for step one.  
-
-             ** 2. Step Two: **  
-              Supporting details for step two.
-
-            4. Add a space after each punctuation mark:
-               Period (. )
-               Comma (, )
-               Colon (: )
-               Semicolon (; )
-               Question mark (? )
-               Exclamation mark (! )
-
-            If the query is unrelated to immigration, respond in the same language as the user's query with a variation of: 
-            "I am an AI agent designed to assist with immigration-related questions. I cannot help with this." Avoid providing any further responses for out-of-context queries.
-
-            Always answer the user's query in the same language it was asked. 
-            If the question is immigration-related, translate your response into the user's language to ensure it is accessible and clear. 
-            If there is no relevant information, respond with "No information found" in the user's language.
-
-            Respond in the user's query language. 
+            You are a helpful AI assistant specializing in immigration law and procedures.
+            Based on the user's query, perform a targeted search of recent,
+            credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources.
+            Provide responses in a structured JSON format with the following schema:
+            {
+              "response": {
+                "mainAnswer": string,  // Direct, concise answer to the query
+                "steps": [{           // Optional array of steps if applicable
+                  "title": string,    // Step title/header
+                  "description": string, // Step details
+                  "links": [{         // Optional relevant links
+                    "text": string,   // Link text
+                    "url": string     // Link URL
+                  }]
+                }],
+                "sources": [{        // Optional authoritative sources
+                  "name": string,    // Source name
+                  "url": string      // Source URL
+                }],
+                "language": string   // Response language code (e.g. "en", "es")
+              }
+            }
+            
+            Keep responses concise and clear. When a yes/no response is sufficient, answer decisively without prefacing.
+            If the query is unrelated to immigration, respond with a refusal message in the same language.
+            Always respond in the user's query language.
             `,
           },
           ...parsedHistory.map((entry: { query: string; response: string }) => [
@@ -123,6 +105,61 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
           ]).flat(),
           { role: "user", content: message },
         ],
+        response_format: { 
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              response: {
+                type: "object",
+                properties: {
+                  mainAnswer: { type: "string" },
+                  steps: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        title: { type: "string" },
+                        description: { type: "string" },
+                        links: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              text: { type: "string" },
+                              url: { type: "string" }
+                            },
+                            required: ["text", "url"],
+                            additionalProperties: false
+                          }
+                        }
+                      },
+                      required: ["title", "description"],
+                      additionalProperties: false
+                    }
+                  },
+                  sources: {
+                    type: "array", 
+                    items: {
+                      type: "object",
+                      properties: {
+                        name: { type: "string" },
+                        url: { type: "string" }
+                      },
+                      required: ["name", "url"],
+                      additionalProperties: false
+                    }
+                  },
+                  language: { type: "string" }
+                },
+                required: ["mainAnswer", "language"],
+                additionalProperties: false
+              }
+            },
+            required: ["response"],
+            additionalProperties: false
+          }
+        },
         stream: true,
       },
       headers: {
@@ -134,7 +171,7 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
 
     let buffer = '';
 
-    openAIResponse.data.on("data", (chunk: Buffer) => {
+    openAIResponse.data.on('data', (chunk: Buffer) => {
       const lines = chunk.toString().split("\n");
       for (const line of lines) {
         if (line.startsWith("data: ")) {
@@ -169,16 +206,28 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
               if (token) {
                 buffer += token;
                 
-                // Only send complete sentences or paragraphs
-                if (buffer.match(/[.!?]\s*$/) || buffer.includes('\n\n')) {
-                  const cleanToken = formatBuffer(buffer);
-                  res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
-                  buffer = '';
+                // Try to parse accumulated buffer as JSON when we have a complete object
+                if (buffer.includes('}')) {
+                  try {
+                    const parsedJson = JSON.parse(buffer);
+                    // If successful parse, send the structured response
+                    res.write(`data: ${JSON.stringify({ 
+                      structured: true,
+                      response: parsedJson.response 
+                    })}\n\n`);
+                    buffer = '';
+                  } catch (parseError) {
+                    // Not complete JSON yet, continue accumulating
+                    if (buffer.match(/[.!?]\s*$/) || buffer.includes('\n\n')) {
+                      const cleanToken = formatBuffer(buffer);
+                      res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
+                      buffer = '';
+                    }
+                  }
                 }
               }
             } catch (parseError) {
               console.log("Incomplete JSON chunk received:", jsonData);
-              // Continue to next chunk if JSON is incomplete
               continue;
             }
           } catch (err: unknown) {
