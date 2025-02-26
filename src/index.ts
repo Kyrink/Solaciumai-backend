@@ -35,8 +35,22 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        connectSrc: ["'self'", "https://solacium-ai-frontend.vercel.app"],
-      },
+        connectSrc: [
+          "'self'",
+          "https://solacium-ai-frontend.vercel.app",
+          "https://solacium-ai-frontend-k00bpjb3z-kyrin-s-projects.vercel.app",
+          "https://www.solacium.one",
+          "http://localhost:3000",
+          "http://localhost:8080"
+        ],
+        fontSrc: ["'self'", "https:", "data:"],
+        imgSrc: ["'self'", "data:", "https:"],
+        styleSrc: ["'self'", "https:", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        frameSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        upgradeInsecureRequests: []
+      }
     },
     crossOriginResourcePolicy: { policy: "cross-origin" },
     crossOriginOpenerPolicy: { policy: "same-origin" },
@@ -49,6 +63,7 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.flushHeaders();
   
   try {
@@ -66,123 +81,86 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
       method: "post", 
       url: "https://api.openai.com/v1/chat/completions",
       data: {
-        model: "gpt-4",
+        model: "gpt-4-turbo-preview",
         messages: [
           {
             role: "system",
-            content: `
-            You are a helpful AI assistant specializing in immigration law and procedures.
-            Based on the user's query, perform a targeted search of recent,
-            credible information on immigration from authoritative sources, such as government websites, legal advisories, and trusted immigration resources.
-            Provide responses in a structured JSON format with the following schema:
+            content: `You are a helpful AI assistant specializing in immigration law and procedures.
+            Based on the user's query, provide accurate information from authoritative sources.
+            
+            You MUST respond with valid JSON in this exact format:
             {
               "response": {
-                "mainAnswer": string,  // Direct, concise answer to the query
-                "steps": [{           // Optional array of steps if applicable
-                  "title": string,    // Step title/header
-                  "description": string, // Step details
-                  "links": [{         // Optional relevant links
-                    "text": string,   // Link text
-                    "url": string     // Link URL
-                  }]
-                }],
-                "sources": [{        // Optional authoritative sources
-                  "name": string,    // Source name
-                  "url": string      // Source URL
-                }],
-                "language": string   // Response language code (e.g. "en", "es")
+                "mainAnswer": "your direct, concise answer here",
+                "steps": [
+                  {
+                    "title": "step title",
+                    "description": "step details",
+                    "links": [
+                      {
+                        "text": "link text",
+                        "url": "link url"
+                      }
+                    ]
+                  }
+                ],
+                "sources": [
+                  {
+                    "name": "source name",
+                    "url": "source url"
+                  }
+                ],
+                "language": "en"
               }
             }
             
-            Keep responses concise and clear. When a yes/no response is sufficient, answer decisively without prefacing.
-            If the query is unrelated to immigration, respond with a refusal message in the same language.
-            Always respond in the user's query language.
-            `,
+            Guidelines:
+            1. Keep responses concise and clear
+            2. When a yes/no response is sufficient, answer decisively
+            3. If the query is unrelated to immigration, respond with a refusal message
+            4. Always respond in the user's query language (default: en)
+            5. The steps and sources arrays are optional, but mainAnswer and language are required
+            6. All URLs must be from authoritative sources
+            7. DO NOT include any text outside the JSON structure
+            8. Always answer based on US immigration law and procedures unless otherwise specified`
           },
           ...parsedHistory.map((entry: { query: string; response: string }) => [
             { role: "user", content: entry.query },
             { role: "assistant", content: entry.response },
           ]).flat(),
-          { role: "user", content: message },
+          { role: "user", content: message as string },
         ],
-        response_format: { 
-          type: "json_schema",
-          schema: {
-            type: "object",
-            properties: {
-              response: {
-                type: "object",
-                properties: {
-                  mainAnswer: { type: "string" },
-                  steps: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        title: { type: "string" },
-                        description: { type: "string" },
-                        links: {
-                          type: "array",
-                          items: {
-                            type: "object",
-                            properties: {
-                              text: { type: "string" },
-                              url: { type: "string" }
-                            },
-                            required: ["text", "url"],
-                            additionalProperties: false
-                          }
-                        }
-                      },
-                      required: ["title", "description"],
-                      additionalProperties: false
-                    }
-                  },
-                  sources: {
-                    type: "array", 
-                    items: {
-                      type: "object",
-                      properties: {
-                        name: { type: "string" },
-                        url: { type: "string" }
-                      },
-                      required: ["name", "url"],
-                      additionalProperties: false
-                    }
-                  },
-                  language: { type: "string" }
-                },
-                required: ["mainAnswer", "language"],
-                additionalProperties: false
-              }
-            },
-            required: ["response"],
-            additionalProperties: false
-          }
-        },
+        response_format: { "type": "json_object" },
+        temperature: 0.7,
         stream: true,
       },
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
       },
       responseType: "stream",
     });
 
     let buffer = '';
+    let hasMainAnswer = false;
+    let stepCount = 0;
+    let hasShownSources = false;
 
     openAIResponse.data.on('data', (chunk: Buffer) => {
       const lines = chunk.toString().split("\n");
       for (const line of lines) {
+        if (line.trim() === '') continue;
+        
         if (line.startsWith("data: ")) {
-          const data = line.slice(5).trim(); // Remove "data: " prefix
-    
-          // Handle end of stream or flush remaining buffer
+          const data = line.slice(5).trim();
+          
           if (!data || data === "[DONE]") {
             if (buffer.trim()) {
               try {
                 const cleanToken = formatBuffer(buffer);
-                res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
+                if (cleanToken.trim()) {
+                  res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
+                }
                 buffer = '';
               } catch (err) {
                 console.error("Error processing buffer content:", err);
@@ -195,43 +173,88 @@ app.get("/api/chat", async (req: Request, res: Response, next: NextFunction) => 
             }
             continue;
           }
-    
+
           try {
-            // Handle partial JSON chunks
-            let jsonData = data;
-            try {
-              const parsed = JSON.parse(jsonData);
-              const token = parsed.choices?.[0]?.delta?.content;
-    
-              if (token) {
-                buffer += token;
-                
-                // Try to parse accumulated buffer as JSON when we have a complete object
-                if (buffer.includes('}')) {
-                  try {
-                    const parsedJson = JSON.parse(buffer);
-                    // If successful parse, send the structured response
-                    res.write(`data: ${JSON.stringify({ 
-                      structured: true,
-                      response: parsedJson.response 
-                    })}\n\n`);
-                    buffer = '';
-                  } catch (parseError) {
-                    // Not complete JSON yet, continue accumulating
-                    if (buffer.match(/[.!?]\s*$/) || buffer.includes('\n\n')) {
-                      const cleanToken = formatBuffer(buffer);
-                      res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
-                      buffer = '';
+            const parsed = JSON.parse(data);
+            const token = parsed.choices?.[0]?.delta?.content;
+
+            if (token) {
+              buffer += token;
+              
+              // If we have a complete JSON object
+              if (buffer.includes('}')) {
+                try {
+                  // Try to parse the buffer as JSON
+                  const parsedJson = JSON.parse(buffer);
+                  
+                  // If we successfully parsed the JSON and it has a 'response' object
+                  if (parsedJson.response) {
+                    const response = parsedJson.response;
+                    
+                    // Format the response into a well-formatted markdown string
+                    let formattedMarkdown = '';
+                    
+                    // Add main answer
+                    formattedMarkdown += response.mainAnswer + '\n\n';
+                    
+                    // Add steps if any
+                    if (response.steps && response.steps.length > 0) {
+                      response.steps.forEach((step: any, index: number) => {
+                        formattedMarkdown += `**${index + 1}. ${step.title}**\n    ${step.description}\n`;
+                        
+                        if (step.links && step.links.length > 0) {
+                          // Add the first link on the same line as "Helpful links:"
+                          formattedMarkdown += `\nHelpful links: [${step.links[0].text}](${step.links[0].url})`;
+                          
+                          // Add remaining links as bullet points (if any)
+                          if (step.links.length > 1) {
+                            formattedMarkdown += "\n";
+                            step.links.slice(1).forEach((link: any) => {
+                              formattedMarkdown += `* [${link.text}](${link.url})\n`;
+                            });
+                          } else {
+                            formattedMarkdown += "\n"; // Just a newline if there's only one link
+                          }
+                        }
+                        
+                        formattedMarkdown += '\n';
+                      });
                     }
+                    
+                    // Add sources if any
+                    if (response.sources && response.sources.length > 0) {
+                      formattedMarkdown += '---\n\n**Sources:**\n';
+                      response.sources.forEach((source: any) => {
+                        formattedMarkdown += `* [${source.name}](${source.url})\n`;
+                      });
+                    }
+                    
+                    // Send the formatted markdown string as token
+                    res.write(`data: ${JSON.stringify({ token: formattedMarkdown })}\n\n`);
+                    
+                    // Also send the structured data for reference
+                    res.write(`data: ${JSON.stringify({ structured: response })}\n\n`);
+                    
+                    buffer = '';
+                    hasMainAnswer = true;
+                    stepCount = response.steps ? response.steps.length : 0;
+                    hasShownSources = true;
+                  }
+                } catch (parseError) {
+                  // Not complete JSON yet, continue accumulating
+                  if (buffer.match(/[.!?]\s*$/) || buffer.includes('\n\n')) {
+                    const cleanToken = formatBuffer(buffer);
+                    if (cleanToken.trim()) {
+                      res.write(`data: ${JSON.stringify({ token: cleanToken })}\n\n`);
+                    }
+                    buffer = '';
                   }
                 }
               }
-            } catch (parseError) {
-              console.log("Incomplete JSON chunk received:", jsonData);
-              continue;
             }
-          } catch (err: unknown) {
-            console.error("Stream processing error:", err instanceof Error ? err.message : String(err));
+          } catch (parseError) {
+            console.error("Error parsing chunk:", parseError);
+            continue;
           }
         }
       }
